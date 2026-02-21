@@ -25,6 +25,8 @@ build/
 # Secrets & Config (keep templates, ignore actual secrets)
 .env
 config/config.json
+config/senior-accounting.json
+config/junior-accounting.json
 
 # Test
 coverage.txt

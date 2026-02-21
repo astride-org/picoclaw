@@ -1,0 +1,43 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.picoclaw/workspace",
+      "restrict_to_workspace": true,
+      "model": "MiniMax-M2.5",
+      "max_tokens": 8192,
+      "temperature": 0.5,
+      "max_tool_iterations": 20
+    }
+  },
+  "model_list": [
+    {
+      "model_name": "MiniMax-M2.5",
+      "model": "MiniMax-M2.5-highspeed",
+      "api_base": "https://api.minimax.io/v1",
+      "api_key": "YOUR_MINIMAX_API_KEY"
+    }
+  ],
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "token": "YOUR_DISCORD_BOT_TOKEN",
+      "allow_from": [],
+      "mention_only": true
+    }
+  },
+  "tools": {
+    "web": {
+      "duckduckgo": {
+        "enabled": true,
+        "max_results": 5
+      }
+    }
+  },
+  "heartbeat": {
+    "enabled": false
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790
+  }
+}
