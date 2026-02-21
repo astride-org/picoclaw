@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test docker-up docker-down docker-rebuild docker-logs
+.PHONY: all build install uninstall clean help test docker-up docker-down docker-rebuild docker-logs docker-build docker-build-full docker-test docker-run docker-run-full docker-run-agent docker-run-agent-full docker-clean new-agent
 
 # Build variables
 BINARY_NAME=picoclaw
@@ -203,6 +203,44 @@ new-agent:
 	@echo ""
 	@echo "Start with: make docker-up-$(NAME)"
 
+## docker-build: Build Docker image (minimal Alpine-based)
+docker-build:
+	@echo "Building minimal Docker image (Alpine-based)..."
+	docker compose build picoclaw-agent picoclaw-gateway
+
+## docker-build-full: Build Docker image with full MCP support (Node.js 24)
+docker-build-full:
+	@echo "Building full-featured Docker image (Node.js 24)..."
+	docker compose -f docker-compose.full.yml build picoclaw-agent picoclaw-gateway
+
+## docker-test: Test MCP tools in Docker container
+docker-test:
+	@echo "Testing MCP tools in Docker..."
+	@chmod +x scripts/test-docker-mcp.sh
+	@./scripts/test-docker-mcp.sh
+
+## docker-run: Run picoclaw gateway in Docker (Alpine-based)
+docker-run:
+	docker compose --profile gateway up
+
+## docker-run-full: Run picoclaw gateway in Docker (full-featured)
+docker-run-full:
+	docker compose -f docker-compose.full.yml --profile gateway up
+
+## docker-run-agent: Run picoclaw agent in Docker (interactive, Alpine-based)
+docker-run-agent:
+	docker compose run --rm picoclaw-agent
+
+## docker-run-agent-full: Run picoclaw agent in Docker (interactive, full-featured)
+docker-run-agent-full:
+	docker compose -f docker-compose.full.yml run --rm picoclaw-agent
+
+## docker-clean: Clean Docker images and volumes
+docker-clean:
+	docker compose down -v
+	docker compose -f docker-compose.full.yml down -v
+	docker rmi picoclaw:latest picoclaw:full 2>/dev/null || true
+
 ## help: Show this help message
 help:
 	@echo "picoclaw Makefile"
@@ -218,6 +256,8 @@ help:
 	@echo "  make install            # Install to ~/.local/bin"
 	@echo "  make uninstall          # Remove from /usr/local/bin"
 	@echo "  make install-skills     # Install skills to workspace"
+	@echo "  make docker-build       # Build minimal Docker image"
+	@echo "  make docker-test        # Test MCP tools in Docker"
 	@echo ""
 	@echo "Environment Variables:"
 	@echo "  INSTALL_PREFIX          # Installation prefix (default: ~/.local)"
