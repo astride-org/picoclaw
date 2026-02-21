@@ -319,6 +319,10 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 			"matched_by":  route.MatchedBy,
 		})
 
+	if msg.Metadata["context_only"] == "true" {
+		return al.storeContextOnly(agent, sessionKey, msg.Content)
+	}
+
 	return al.runAgentLoop(ctx, agent, processOptions{
 		SessionKey:      sessionKey,
 		Channel:         msg.Channel,

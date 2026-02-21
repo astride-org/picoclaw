@@ -186,6 +186,7 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 
 	// If configured to only respond to mentions, check if bot is mentioned
 	// Skip this check for DMs (GuildID is empty) - DMs should always be responded to
+	contextOnly := false
 	if c.config.MentionOnly && m.GuildID != "" {
 		isMentioned := false
 		for _, mention := range m.Mentions {
@@ -195,10 +196,14 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 			}
 		}
 		if !isMentioned {
-			logger.DebugCF("discord", "Message ignored - bot not mentioned", map[string]any{
-				"user_id": m.Author.ID,
-			})
-			return
+			if os.Getenv("PICOCLAW_DISCORD_LISTEN_ALL") == "true" {
+				contextOnly = true
+			} else {
+				logger.DebugCF("discord", "Message ignored - bot not mentioned", map[string]any{
+					"user_id": m.Author.ID,
+				})
+				return
+			}
 		}
 	}
 
@@ -278,7 +283,9 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 	}
 
 	// Start typing after all early returns — guaranteed to have a matching Send()
-	c.startTyping(m.ChannelID)
+	if !contextOnly {
+		c.startTyping(m.ChannelID)
+	}
 
 	logger.DebugCF("discord", "Received message", map[string]any{
 		"sender_name": senderName,
@@ -303,6 +310,11 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 		"is_dm":        fmt.Sprintf("%t", m.GuildID == ""),
 		"peer_kind":    peerKind,
 		"peer_id":      peerID,
+		"context_only": fmt.Sprintf("%t", contextOnly),
+	}
+
+	if contextOnly {
+		content = fmt.Sprintf("%s: %s", senderName, content)
 	}
 
 	c.HandleMessage(senderID, m.ChannelID, content, mediaPaths, metadata)

@@ -1,0 +1,72 @@
+# ============================================================
+# Multi-Agent Docker Compose
+#
+# Each agent runs in its own container with isolated config,
+# workspace, and port. Add more agents by copying a gateway
+# block and changing container_name, volumes, and ports.
+#
+# Usage:
+#   docker compose -f docker-compose.multi.yml --profile gateway up
+#   docker compose -f docker-compose.multi.yml up picoclaw-senior-accounting
+#   docker compose -f docker-compose.multi.yml run --rm picoclaw-agent -m "Hello"
+#
+# Setup:
+#   1. Copy example configs: cp config/senior-accounting.example.json config/senior-accounting.json
+#   2. Each config has its own Discord token, model, and agent settings
+# ============================================================
+
+services:
+  # ─────────────────────────────────────────────
+  # PicoClaw Agent (one-shot query)
+  #   docker compose -f docker-compose.multi.yml run --rm picoclaw-agent -m "Hello"
+  # ─────────────────────────────────────────────
+  picoclaw-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: picoclaw-agent
+    profiles:
+      - agent
+    volumes:
+      - ./config/config.json:/home/picoclaw/.picoclaw/config.json:ro
+      - picoclaw-workspace:/home/picoclaw/.picoclaw/workspace
+    entrypoint: ["picoclaw", "agent"]
+    stdin_open: true
+    tty: true
+
+  # ─────────────────────────────────────────────
+  # Gateway: Senior Accounting Bot
+  # ─────────────────────────────────────────────
+  picoclaw-senior-accounting: &gateway-base
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    profiles:
+      - gateway
+    command: ["gateway"]
+    container_name: picoclaw-senior-accounting
+    environment:
+      - PICOCLAW_DISCORD_LISTEN_ALL=true
+    volumes:
+      - ./config/senior-accounting.json:/home/picoclaw/.picoclaw/config.json:ro
+      - picoclaw-workspace-senior:/home/picoclaw/.picoclaw/workspace
+    ports:
+      - "18790:18790"
+
+  # ─────────────────────────────────────────────
+  # Gateway: Junior Accounting Bot
+  # ─────────────────────────────────────────────
+  picoclaw-junior-accounting:
+    <<: *gateway-base
+    container_name: picoclaw-junior-accounting
+    volumes:
+      - ./config/junior-accounting.json:/home/picoclaw/.picoclaw/config.json:ro
+      - picoclaw-workspace-junior:/home/picoclaw/.picoclaw/workspace
+    ports:
+      - "18800:18790"
+
+volumes:
+  picoclaw-workspace:
+  picoclaw-workspace-senior:
+  picoclaw-workspace-junior:
