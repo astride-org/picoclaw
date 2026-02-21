@@ -1,0 +1,53 @@
+# ============================================================
+# Multi-Agent Docker Compose (base)
+#
+# Agent services are defined in config/agents/<name>/compose.yml.
+# To add a new agent, create a folder in config/agents/ with:
+#   - config.json   (agent configuration)
+#   - compose.yml   (docker compose service definition)
+#
+# The Makefile discovers all agents automatically:
+#   make docker-up          # start all gateway agents
+#   make docker-down        # stop everything
+#   make docker-logs        # follow all logs
+#   make docker-up-<name>   # start a single agent (e.g. make docker-up-senior-developer)
+# ============================================================
+
+services:
+  # ─────────────────────────────────────────────
+  # PicoClaw Agent (one-shot query)
+  #   docker compose -f docker-compose.multi.yml run --rm picoclaw-agent -m "Hello"
+  # ─────────────────────────────────────────────
+  picoclaw-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: picoclaw-agent
+    profiles:
+      - agent
+    volumes:
+      - ./config/config.json:/home/picoclaw/.picoclaw/config.json:ro
+    entrypoint: ["picoclaw", "agent"]
+    stdin_open: true
+    tty: true
+
+  # ─────────────────────────────────────────────
+  # PostgreSQL for Task Queue
+  # ─────────────────────────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    container_name: picoclaw-postgres
+    restart: unless-stopped
+    profiles:
+      - gateway
+    environment:
+      POSTGRES_USER: picoclaw
+      POSTGRES_PASSWORD: picoclaw
+      POSTGRES_DB: picoclaw_tasks
+    volumes:
+      - picoclaw-pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  picoclaw-pgdata:
