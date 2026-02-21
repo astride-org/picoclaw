@@ -1,0 +1,26 @@
+# Example Agent
+#
+# To create a new agent:
+#   1. Copy this folder:  cp -r config/agents/example config/agents/my-agent
+#   2. Rename files:      mv config/agents/my-agent/config.example.json config/agents/my-agent/config.json
+#                          mv config/agents/my-agent/compose.example.yml config/agents/my-agent/compose.yml
+#   3. Edit config.json with your API keys and Discord token
+#   4. Edit compose.yml: update service name, container_name, volumes, and port
+#   5. Run:               make docker-up-my-agent
+
+services:
+  picoclaw-example:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    profiles:
+      - gateway
+    command: ["gateway"]
+    container_name: picoclaw-example
+    volumes:
+      - ./config/agents/example/config.json:/home/picoclaw/.picoclaw/config.json:ro
+      - ./workspace/example:/home/picoclaw/.picoclaw/workspace
+      - ./workspace/skills:/home/picoclaw/.picoclaw/workspace/skills:ro
+    ports:
+      - "18790:18790"

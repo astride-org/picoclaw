@@ -42,14 +42,15 @@ type AgentLoop struct {
 
 // processOptions configures how a message is processed
 type processOptions struct {
-	SessionKey      string // Session identifier for history/context
-	Channel         string // Target channel for tool execution
-	ChatID          string // Target chat ID for tool execution
-	UserMessage     string // User message content (may include prefix)
-	DefaultResponse string // Response when LLM returns empty
-	EnableSummary   bool   // Whether to trigger summarization
-	SendResponse    bool   // Whether to send response via bus
-	NoHistory       bool   // If true, don't load session history (for heartbeat)
+	SessionKey      string            // Session identifier for history/context
+	Channel         string            // Target channel for tool execution
+	ChatID          string            // Target chat ID for tool execution
+	UserMessage     string            // User message content (may include prefix)
+	DefaultResponse string            // Response when LLM returns empty
+	EnableSummary   bool              // Whether to trigger summarization
+	SendResponse    bool              // Whether to send response via bus
+	NoHistory       bool              // If true, don't load session history (for heartbeat)
+	Metadata        map[string]string // Forwarded from InboundMessage
 }
 
 func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers.LLMProvider) *AgentLoop {
@@ -144,6 +145,15 @@ func registerSharedTools(
 			return registry.CanSpawnSubagent(currentAgentID, targetAgentID)
 		})
 		agent.Tools.Register(spawnTool)
+
+		// Playbook tools (task mode)
+		if agent.PlaybookManager != nil {
+			agent.Tools.Register(tools.NewPlaybookSearchTool(agent.PlaybookManager))
+			agent.Tools.Register(tools.NewPlaybookCreateTool(agent.PlaybookManager))
+			agent.Tools.Register(tools.NewPlaybookRecordTool(agent.PlaybookManager, agentID))
+			agent.Tools.Register(tools.NewPlaybookListTool(agent.PlaybookManager))
+			agent.ContextBuilder.SetPlaybookManager(agent.PlaybookManager)
+		}
 
 		// Update context builder with the complete tools registry
 		agent.ContextBuilder.SetToolsRegistry(agent.Tools)
@@ -319,6 +329,18 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 			"matched_by":  route.MatchedBy,
 		})
 
+	if msg.Metadata["task_mode"] == "true" {
+		logger.InfoCF("agent", "Task mode activated", map[string]any{
+			"task_description": msg.Metadata["task_description"],
+			"thread_id":        msg.Metadata["thread_id"],
+			"channel":          msg.Channel,
+			"chat_id":          msg.ChatID,
+			"sender_id":        msg.SenderID,
+			"agent_id":         agent.ID,
+			"session_key":      sessionKey,
+		})
+	}
+
 	return al.runAgentLoop(ctx, agent, processOptions{
 		SessionKey:      sessionKey,
 		Channel:         msg.Channel,
@@ -327,6 +349,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		DefaultResponse: "I've completed processing but have no response to give.",
 		EnableSummary:   true,
 		SendResponse:    false,
+		Metadata:        msg.Metadata,
 	})
 }
 
@@ -401,6 +424,11 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 
 	// 1. Update tool contexts
 	al.updateToolContexts(agent, opts.Channel, opts.ChatID)
+
+	// 1.5. Set task context for playbook injection
+	taskMode := opts.Metadata["task_mode"] == "true"
+	taskDescription := opts.Metadata["task_description"]
+	agent.ContextBuilder.SetTaskContext(taskMode, taskDescription)
 
 	// 2. Build messages (skip history for heartbeat)
 	var history []providers.Message

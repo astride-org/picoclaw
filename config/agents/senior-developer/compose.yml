@@ -1,0 +1,19 @@
+# Senior Developer Agent
+# Just drop this folder into config/agents/ and run `make docker-up`
+
+services:
+  picoclaw-senior-developer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    profiles:
+      - gateway
+    command: ["gateway"]
+    container_name: picoclaw-senior-developer
+    volumes:
+      - ./config/agents/senior-developer/config.json:/home/picoclaw/.picoclaw/config.json:ro
+      - ./workspace/senior-developer:/home/picoclaw/.picoclaw/workspace
+      - ./workspace/skills:/home/picoclaw/.picoclaw/workspace/skills:ro
+    ports:
+      - "18790:18790"

@@ -5,7 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/lucas-stellet/playbookd"
+	"github.com/lucas-stellet/playbookd/embed"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -28,9 +31,10 @@ type AgentInstance struct {
 	Sessions       *session.SessionManager
 	ContextBuilder *ContextBuilder
 	Tools          *tools.ToolRegistry
-	Subagents      *config.SubagentsConfig
-	SkillsFilter   []string
-	Candidates     []providers.FallbackCandidate
+	Subagents       *config.SubagentsConfig
+	SkillsFilter    []string
+	Candidates      []providers.FallbackCandidate
+	PlaybookManager *playbookd.PlaybookManager // nil if init fails
 }
 
 // NewAgentInstance creates an agent instance from config.
@@ -88,6 +92,21 @@ func NewAgentInstance(
 		temperature = *defaults.Temperature
 	}
 
+	// Initialize playbook manager
+	playbooksDir := filepath.Join(workspace, "playbooks")
+	os.MkdirAll(playbooksDir, 0o755)
+
+	pbManager, err := playbookd.NewPlaybookManager(playbookd.ManagerConfig{
+		DataDir:   playbooksDir,
+		EmbedFunc: embed.Noop(),
+	})
+	if err != nil {
+		logger.WarnCF("agent", "Failed to init playbook manager", map[string]any{
+			"error": err.Error(),
+		})
+		// pbManager stays nil — tools won't register, agent continues normal
+	}
+
 	// Resolve fallback candidates
 	modelCfg := providers.ModelConfig{
 		Primary:   model,
@@ -110,9 +129,18 @@ func NewAgentInstance(
 		ContextBuilder: contextBuilder,
 		Tools:          toolsRegistry,
 		Subagents:      subagents,
-		SkillsFilter:   skillsFilter,
-		Candidates:     candidates,
+		SkillsFilter:    skillsFilter,
+		Candidates:      candidates,
+		PlaybookManager: pbManager,
 	}
+}
+
+// Close releases resources held by the agent instance.
+func (a *AgentInstance) Close() error {
+	if a.PlaybookManager != nil {
+		return a.PlaybookManager.Close()
+	}
+	return nil
 }
 
 // resolveAgentWorkspace determines the workspace directory for an agent.

@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test
+.PHONY: all build install uninstall clean help test docker-up docker-down docker-rebuild docker-logs
 
 # Build variables
 BINARY_NAME=picoclaw
@@ -157,6 +157,51 @@ check: deps fmt vet test
 ## run: Build and run picoclaw
 run: build
 	@$(BUILD_DIR)/$(BINARY_NAME) $(ARGS)
+
+# Docker Compose (multi-agent)
+# Discovers all agents from config/agents/*/compose.yml automatically
+COMPOSE_FILE=docker-compose.multi.yml
+AGENT_COMPOSE_FILES:=$(wildcard config/agents/*/compose.yml)
+COMPOSE_FLAGS=-f $(COMPOSE_FILE) $(foreach f,$(AGENT_COMPOSE_FILES),-f $(f)) --project-directory .
+
+## docker-up: Build and start all gateway agents
+docker-up:
+	@docker compose $(COMPOSE_FLAGS) --profile gateway up --build -d
+
+## docker-up-%: Build and start a single agent (e.g. make docker-up-senior-developer)
+docker-up-%:
+	@docker compose $(COMPOSE_FLAGS) up --build -d picoclaw-$*
+
+## docker-rebuild: Rebuild and restart containers without downtime
+docker-rebuild:
+	@docker compose $(COMPOSE_FLAGS) --profile gateway up --build -d --force-recreate
+
+## docker-rebuild-%: Rebuild and restart a single agent (e.g. make docker-rebuild-senior-developer)
+docker-rebuild-%:
+	@docker compose $(COMPOSE_FLAGS) up --build -d --force-recreate picoclaw-$*
+
+## docker-down: Stop all containers
+docker-down:
+	@docker compose $(COMPOSE_FLAGS) --profile gateway down
+
+## docker-logs: Follow logs from all gateway agents
+docker-logs:
+	@docker compose $(COMPOSE_FLAGS) --profile gateway logs -f
+
+## new-agent: Scaffold a new agent (usage: make new-agent NAME=my-agent)
+new-agent:
+	@if [ -z "$(NAME)" ]; then echo "Usage: make new-agent NAME=my-agent"; exit 1; fi
+	@if [ -d "config/agents/$(NAME)" ]; then echo "Error: agent '$(NAME)' already exists"; exit 1; fi
+	@mkdir -p config/agents/$(NAME)
+	@sed 's/example/$(NAME)/g' config/agents/example/config.example.json > config/agents/$(NAME)/config.json
+	@sed 's/example/$(NAME)/g' config/agents/example/compose.example.yml > config/agents/$(NAME)/compose.yml
+	@mkdir -p workspace/$(NAME)
+	@ln -sfn ../skills workspace/$(NAME)/skills
+	@echo "Agent '$(NAME)' created:"
+	@echo "  config/agents/$(NAME)/config.json   <- edit API keys and Discord token"
+	@echo "  config/agents/$(NAME)/compose.yml    <- edit port if needed"
+	@echo ""
+	@echo "Start with: make docker-up-$(NAME)"
 
 ## help: Show this help message
 help:

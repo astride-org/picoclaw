@@ -221,6 +221,7 @@ type DiscordConfig struct {
 	Token       string              `json:"token"        env:"PICOCLAW_CHANNELS_DISCORD_TOKEN"`
 	AllowFrom   FlexibleStringSlice `json:"allow_from"   env:"PICOCLAW_CHANNELS_DISCORD_ALLOW_FROM"`
 	MentionOnly bool                `json:"mention_only" env:"PICOCLAW_CHANNELS_DISCORD_MENTION_ONLY"`
+	TaskPrefix  string              `json:"task_prefix"  env:"PICOCLAW_CHANNELS_DISCORD_TASK_PREFIX"`
 }
 
 type MaixCamConfig struct {
