@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -17,10 +18,18 @@ import (
 	"github.com/sipeed/picoclaw/pkg/voice"
 )
 
+var thinkTagRe = regexp.MustCompile(`(?s)<think>\s*(.*?)\s*</think>`)
+
 const (
 	transcriptionTimeout = 30 * time.Second
 	sendTimeout          = 10 * time.Second
 )
+
+// threadInfo caches thread metadata to avoid repeated Discord API calls.
+type threadInfo struct {
+	IsTask      bool
+	Description string // thread name without the task prefix
+}
 
 type DiscordChannel struct {
 	*BaseChannel
@@ -31,6 +40,7 @@ type DiscordChannel struct {
 	typingMu    sync.Mutex
 	typingStop  map[string]chan struct{} // chatID → stop signal
 	botUserID   string                   // stored for mention checking
+	threadCache sync.Map                 // threadID → threadInfo
 }
 
 func NewDiscordChannel(cfg config.DiscordConfig, bus *bus.MessageBus) (*DiscordChannel, error) {
@@ -126,7 +136,31 @@ func (c *DiscordChannel) Send(ctx context.Context, msg bus.OutboundMessage) erro
 		return nil
 	}
 
-	chunks := utils.SplitMessage(msg.Content, 2000) // Split messages into chunks, Discord length limit: 2000 chars
+	// Extract <think>...</think> blocks and send them as embeds
+	thinkMatches := thinkTagRe.FindAllStringSubmatch(msg.Content, -1)
+	body := strings.TrimSpace(thinkTagRe.ReplaceAllString(msg.Content, ""))
+
+	for _, match := range thinkMatches {
+		thinkText := match[1]
+		if thinkText == "" {
+			continue
+		}
+		// Discord embed description limit is 4096 chars
+		if len(thinkText) > 4096 {
+			thinkText = thinkText[:4093] + "..."
+		}
+		if err := c.sendEmbed(ctx, channelID, thinkText); err != nil {
+			logger.WarnCF("discord", "Failed to send think embed", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
+
+	if body == "" {
+		return nil
+	}
+
+	chunks := utils.SplitMessage(body, 2000) // Split messages into chunks, Discord length limit: 2000 chars
 
 	for _, chunk := range chunks {
 		if err := c.sendChunk(ctx, channelID, chunk); err != nil {
@@ -156,6 +190,35 @@ func (c *DiscordChannel) sendChunk(ctx context.Context, channelID, content strin
 		return nil
 	case <-sendCtx.Done():
 		return fmt.Errorf("send message timeout: %w", sendCtx.Err())
+	}
+}
+
+func (c *DiscordChannel) sendEmbed(ctx context.Context, channelID, description string) error {
+	sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Embeds: []*discordgo.MessageEmbed{
+				{
+					Description: description,
+					Color:       0x95a5a6, // gray
+					Footer:      &discordgo.MessageEmbedFooter{Text: "thinking"},
+				},
+			},
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("failed to send discord embed: %w", err)
+		}
+		return nil
+	case <-sendCtx.Done():
+		return fmt.Errorf("send embed timeout: %w", sendCtx.Err())
 	}
 }
 
@@ -305,6 +368,15 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 		"peer_id":      peerID,
 	}
 
+	// Detect task threads: if the message is in a thread whose name starts with TaskPrefix
+	if c.config.TaskPrefix != "" {
+		if info, ok := c.resolveThreadInfo(s, m.ChannelID); ok && info.IsTask {
+			metadata["task_mode"] = "true"
+			metadata["task_description"] = info.Description
+			metadata["thread_id"] = m.ChannelID
+		}
+	}
+
 	c.HandleMessage(senderID, m.ChannelID, content, mediaPaths, metadata)
 }
 
@@ -358,6 +430,41 @@ func (c *DiscordChannel) downloadAttachment(url, filename string) string {
 	return utils.DownloadFile(url, filename, utils.DownloadOptions{
 		LoggerPrefix: "discord",
 	})
+}
+
+// resolveThreadInfo looks up thread metadata for the given channel ID, using a cache
+// to avoid repeated Discord API calls. Returns the info and true if the channel is a
+// thread; returns zero value and false otherwise.
+func (c *DiscordChannel) resolveThreadInfo(s *discordgo.Session, channelID string) (threadInfo, bool) {
+	if cached, ok := c.threadCache.Load(channelID); ok {
+		info := cached.(threadInfo)
+		return info, true
+	}
+
+	ch, err := s.Channel(channelID)
+	if err != nil {
+		logger.DebugCF("discord", "Failed to fetch channel info for task detection", map[string]any{
+			"channel_id": channelID,
+			"error":      err.Error(),
+		})
+		return threadInfo{}, false
+	}
+
+	isThread := ch.Type == discordgo.ChannelTypeGuildPublicThread ||
+		ch.Type == discordgo.ChannelTypeGuildPrivateThread
+
+	if !isThread {
+		return threadInfo{}, false
+	}
+
+	info := threadInfo{}
+	if strings.HasPrefix(ch.Name, c.config.TaskPrefix) {
+		info.IsTask = true
+		info.Description = strings.TrimSpace(strings.TrimPrefix(ch.Name, c.config.TaskPrefix))
+	}
+
+	c.threadCache.Store(channelID, info)
+	return info, true
 }
 
 // stripBotMention removes the bot mention from the message content.
