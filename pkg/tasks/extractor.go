@@ -1,4 +1,4 @@
-package agent
+package tasks
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lucas-stellet/playbookd"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -17,26 +18,32 @@ type PlaybookExtractor struct{}
 
 // MaybeExtract is a no-op. Playbook extraction now only happens on the explicit
 // task-finished signal via MaybeExtractOnFinish.
-func (pe *PlaybookExtractor) MaybeExtract(agent *AgentInstance, sessionKey, finalResponse, taskDescription string, iterations int) {
+func (pe *PlaybookExtractor) MaybeExtract(
+	pm *playbookd.PlaybookManager,
+	provider providers.LLMProvider, model string, maxTokens int,
+	sessions SessionProvider, sessionKey, finalResponse, taskDescription string, iterations int,
+) {
 	// No-op: extraction only on task-finished signal
 }
 
 // MaybeExtractOnFinish extracts a playbook when a task-finished signal is received.
-// It uses the bot message content (which contains the task session log from the subagent)
-// as the session context, since the receiving agent may not have its own history for this thread.
-func (pe *PlaybookExtractor) MaybeExtractOnFinish(agent *AgentInstance, sessionKey, botMessage, taskDescription string) {
-	if taskDescription == "" || agent.PlaybookManager == nil {
+func (pe *PlaybookExtractor) MaybeExtractOnFinish(
+	pm *playbookd.PlaybookManager,
+	provider providers.LLMProvider, model string, maxTokens int,
+	sessions SessionProvider, sessionKey, botMessage, taskDescription string,
+) {
+	if taskDescription == "" || pm == nil {
 		logger.DebugCF("playbook", "MaybeExtractOnFinish skipped (no task description or playbook manager)", map[string]any{
 			"session_key":      sessionKey,
 			"task_description": taskDescription,
-			"has_manager":      agent.PlaybookManager != nil,
+			"has_manager":      pm != nil,
 		})
 		return
 	}
 	// Use bot message as session context; fall back to session history if available
 	sessionContext := botMessage
 	if sessionContext == "" {
-		history := agent.Sessions.GetHistory(sessionKey)
+		history := sessions.GetHistory(sessionKey)
 		for i := len(history) - 1; i >= 0; i-- {
 			if history[i].Role == "assistant" && history[i].Content != "" {
 				sessionContext = history[i].Content
@@ -45,23 +52,26 @@ func (pe *PlaybookExtractor) MaybeExtractOnFinish(agent *AgentInstance, sessionK
 		}
 	}
 	logger.InfoCF("playbook", "Starting playbook extraction from task-finished signal", map[string]any{
-		"session_key":       sessionKey,
-		"task_description":  taskDescription,
-		"context_len":       len(sessionContext),
-		"has_context":       sessionContext != "",
+		"session_key":      sessionKey,
+		"task_description": taskDescription,
+		"context_len":      len(sessionContext),
+		"has_context":      sessionContext != "",
 	})
-	go pe.extract(agent, sessionKey, sessionContext, taskDescription)
+	go pe.extract(pm, provider, model, maxTokens, sessions, sessionKey, sessionContext, taskDescription)
 }
 
 // extract runs a background LLM call to distill a completed task session into a reusable playbook.
-// It gives the LLM access only to playbook_create.
-func (pe *PlaybookExtractor) extract(agent *AgentInstance, sessionKey, finalResponse, taskDescription string) {
+func (pe *PlaybookExtractor) extract(
+	pm *playbookd.PlaybookManager,
+	provider providers.LLMProvider, model string, maxTokens int,
+	sessions SessionProvider, sessionKey, finalResponse, taskDescription string,
+) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Build session log from history if available; otherwise use finalResponse directly
 	sessionLog := ""
-	history := agent.Sessions.GetHistory(sessionKey)
+	history := sessions.GetHistory(sessionKey)
 	if len(history) > 0 {
 		sessionLog = buildSessionLog(history)
 	}
@@ -95,15 +105,15 @@ Generalize the steps so they can be reused for similar tasks in the future.`,
 	)
 
 	playbookTools := tools.NewToolRegistry()
-	playbookTools.Register(tools.NewPlaybookCreateTool(agent.PlaybookManager))
+	playbookTools.Register(NewPlaybookCreateTool(pm))
 
 	_, err := tools.RunToolLoop(ctx, tools.ToolLoopConfig{
-		Provider:      agent.Provider,
-		Model:         agent.Model,
+		Provider:      provider,
+		Model:         model,
 		Tools:         playbookTools,
 		MaxIterations: 3,
 		LLMOptions: map[string]any{
-			"max_tokens":  agent.MaxTokens,
+			"max_tokens":  maxTokens,
 			"temperature": 0.3,
 		},
 	}, []providers.Message{

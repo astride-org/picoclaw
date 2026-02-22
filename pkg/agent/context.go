@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lucas-stellet/playbookd"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
@@ -21,9 +19,7 @@ type ContextBuilder struct {
 	skillsLoader    *skills.SkillsLoader
 	memory          *MemoryStore
 	tools           *tools.ToolRegistry // Direct reference to tool registry
-	playbookManager *playbookd.PlaybookManager
-	taskMode        bool
-	taskDescription string
+	taskPromptSection string
 }
 
 func getGlobalConfigDir() string {
@@ -53,15 +49,9 @@ func (cb *ContextBuilder) SetToolsRegistry(registry *tools.ToolRegistry) {
 	cb.tools = registry
 }
 
-// SetPlaybookManager sets the playbook manager for task mode context injection.
-func (cb *ContextBuilder) SetPlaybookManager(pm *playbookd.PlaybookManager) {
-	cb.playbookManager = pm
-}
-
-// SetTaskContext configures task mode state for the current message processing.
-func (cb *ContextBuilder) SetTaskContext(taskMode bool, taskDescription string) {
-	cb.taskMode = taskMode
-	cb.taskDescription = taskDescription
+// SetTaskPromptSection sets the pre-built task mode section for the system prompt.
+func (cb *ContextBuilder) SetTaskPromptSection(section string) {
+	cb.taskPromptSection = section
 }
 
 func (cb *ContextBuilder) getIdentity() string {
@@ -124,75 +114,6 @@ func (cb *ContextBuilder) buildToolsSection() string {
 	return sb.String()
 }
 
-// getPlaybookContext searches for relevant playbooks and formats them for the system prompt.
-func (cb *ContextBuilder) getPlaybookContext() string {
-	if !cb.taskMode || cb.playbookManager == nil || cb.taskDescription == "" {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString("# Task Mode\n\n")
-	sb.WriteString(fmt.Sprintf("**Task**: %s\n\n", cb.taskDescription))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	results, err := cb.playbookManager.Search(ctx, playbookd.SearchQuery{
-		Text:  cb.taskDescription,
-		Mode:  playbookd.SearchModeHybrid,
-		Limit: 3,
-	})
-	if err != nil {
-		logger.WarnCF("agent", "Playbook search failed", map[string]any{
-			"error": err.Error(),
-		})
-		sb.WriteString("(Playbook search failed. You can still create a new playbook with the `playbook_create` tool after completing this task.)\n")
-		return sb.String()
-	}
-
-	if len(results) == 0 {
-		sb.WriteString("No existing playbooks found for this task.\n\n")
-		sb.WriteString("After completing this task, consider creating a playbook using the `playbook_create` tool so you can follow it next time.\n")
-		return sb.String()
-	}
-
-	sb.WriteString("## Relevant Playbooks\n\n")
-	for _, result := range results {
-		pb := result.Playbook
-		sb.WriteString(fmt.Sprintf("### %s (confidence: %.0f%%, v%d, score: %.2f)\n\n",
-			pb.Name, pb.Confidence*100, pb.Version, result.Score))
-
-		if pb.Description != "" {
-			sb.WriteString(fmt.Sprintf("%s\n\n", pb.Description))
-		}
-
-		sb.WriteString("**Steps:**\n")
-		for _, step := range pb.Steps {
-			line := fmt.Sprintf("%d. %s", step.Order, step.Action)
-			if step.Tool != "" {
-				line += fmt.Sprintf(" (tool: %s)", step.Tool)
-			}
-			if step.Expected != "" {
-				line += fmt.Sprintf(" → expect: %s", step.Expected)
-			}
-			sb.WriteString(line + "\n")
-		}
-
-		if len(pb.Lessons) > 0 {
-			sb.WriteString("\n**Lessons learned:**\n")
-			for _, lesson := range pb.Lessons {
-				sb.WriteString(fmt.Sprintf("- %s\n", lesson.Content))
-			}
-		}
-
-		sb.WriteString(fmt.Sprintf("\n**Playbook ID**: `%s`\n\n", pb.ID))
-	}
-
-	sb.WriteString("After completing the task, use `playbook_record` to record the execution outcome. This helps improve confidence scores and track lessons learned.\n")
-
-	return sb.String()
-}
-
 func (cb *ContextBuilder) BuildSystemPrompt() string {
 	parts := []string{}
 
@@ -221,10 +142,9 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 		parts = append(parts, "# Memory\n\n"+memoryContext)
 	}
 
-	// Playbook context (task mode)
-	playbookContext := cb.getPlaybookContext()
-	if playbookContext != "" {
-		parts = append(parts, playbookContext)
+	// Task mode context (playbooks)
+	if cb.taskPromptSection != "" {
+		parts = append(parts, cb.taskPromptSection)
 	}
 
 	// Join with "---" separator

@@ -14,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/tasks"
 	"github.com/sipeed/picoclaw/pkg/utils"
 	"github.com/sipeed/picoclaw/pkg/voice"
 )
@@ -25,22 +26,16 @@ const (
 	sendTimeout          = 10 * time.Second
 )
 
-// threadInfo caches thread metadata to avoid repeated Discord API calls.
-type threadInfo struct {
-	IsTask      bool
-	Description string // thread name without the task prefix
-}
-
 type DiscordChannel struct {
 	*BaseChannel
-	session     *discordgo.Session
-	config      config.DiscordConfig
-	transcriber *voice.GroqTranscriber
-	ctx         context.Context
-	typingMu    sync.Mutex
-	typingStop  map[string]chan struct{} // chatID → stop signal
-	botUserID   string                   // stored for mention checking
-	threadCache sync.Map                 // threadID → threadInfo
+	session      *discordgo.Session
+	config       config.DiscordConfig
+	transcriber  *voice.GroqTranscriber
+	ctx          context.Context
+	typingMu     sync.Mutex
+	typingStop   map[string]chan struct{} // chatID → stop signal
+	botUserID    string                   // stored for mention checking
+	taskDetector tasks.TaskDetector       // nil if TaskPrefix is empty
 }
 
 func NewDiscordChannel(cfg config.DiscordConfig, bus *bus.MessageBus) (*DiscordChannel, error) {
@@ -51,14 +46,23 @@ func NewDiscordChannel(cfg config.DiscordConfig, bus *bus.MessageBus) (*DiscordC
 
 	base := NewBaseChannel("discord", cfg, bus, cfg.AllowFrom)
 
-	return &DiscordChannel{
+	dc := &DiscordChannel{
 		BaseChannel: base,
 		session:     session,
 		config:      cfg,
 		transcriber: nil,
 		ctx:         context.Background(),
 		typingStop:  make(map[string]chan struct{}),
-	}, nil
+	}
+
+	if cfg.TaskPrefix != "" {
+		dc.taskDetector = &discordTaskDetector{
+			prefix:  cfg.TaskPrefix,
+			session: session,
+		}
+	}
+
+	return dc, nil
 }
 
 func (c *DiscordChannel) SetTranscriber(transcriber *voice.GroqTranscriber) {
@@ -368,20 +372,18 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 		"peer_id":      peerID,
 	}
 
-	// Detect task threads: if the message is in a thread whose name starts with TaskPrefix
-	if c.config.TaskPrefix != "" {
-		if info, ok := c.resolveThreadInfo(s, m.ChannelID); ok && info.IsTask {
-			metadata["task_mode"] = "true"
-			metadata["task_description"] = info.Description
-			metadata["thread_id"] = m.ChannelID
-
-			// Bot message with [TASK-FINISHED] marker = task-finished signal
-			if m.Author.Bot && strings.Contains(m.Content, "[TASK-FINISHED]") {
+	// Detect task threads via TaskDetector
+	if c.taskDetector != nil {
+		if info, ok := c.taskDetector.Detect(m.ChannelID); ok && info.IsTask {
+			tasks.ApplyTaskMetadata(metadata, info)
+			// Check if this message signals task completion
+			msgMeta := map[string]string{"is_bot": fmt.Sprintf("%t", m.Author.Bot)}
+			if c.taskDetector.IsFinished(m.Content, msgMeta) {
 				metadata["task_finished"] = "true"
 				logger.InfoCF("discord", "Task-finished signal detected", map[string]any{
 					"bot_username": m.Author.Username,
 					"bot_id":       m.Author.ID,
-					"thread_id":    m.ChannelID,
+					"trace_id":     info.TraceID,
 					"task":         info.Description,
 				})
 			}
@@ -443,41 +445,6 @@ func (c *DiscordChannel) downloadAttachment(url, filename string) string {
 	})
 }
 
-// resolveThreadInfo looks up thread metadata for the given channel ID, using a cache
-// to avoid repeated Discord API calls. Returns the info and true if the channel is a
-// thread; returns zero value and false otherwise.
-func (c *DiscordChannel) resolveThreadInfo(s *discordgo.Session, channelID string) (threadInfo, bool) {
-	if cached, ok := c.threadCache.Load(channelID); ok {
-		info := cached.(threadInfo)
-		return info, true
-	}
-
-	ch, err := s.Channel(channelID)
-	if err != nil {
-		logger.DebugCF("discord", "Failed to fetch channel info for task detection", map[string]any{
-			"channel_id": channelID,
-			"error":      err.Error(),
-		})
-		return threadInfo{}, false
-	}
-
-	isThread := ch.Type == discordgo.ChannelTypeGuildPublicThread ||
-		ch.Type == discordgo.ChannelTypeGuildPrivateThread
-
-	if !isThread {
-		return threadInfo{}, false
-	}
-
-	info := threadInfo{}
-	if strings.HasPrefix(ch.Name, c.config.TaskPrefix) {
-		info.IsTask = true
-		info.Description = strings.TrimSpace(strings.TrimPrefix(ch.Name, c.config.TaskPrefix))
-	}
-
-	c.threadCache.Store(channelID, info)
-	return info, true
-}
-
 // stripBotMention removes the bot mention from the message content.
 // Discord mentions have the format <@USER_ID> or <@!USER_ID> (with nickname).
 func (c *DiscordChannel) stripBotMention(text string) string {
@@ -488,4 +455,45 @@ func (c *DiscordChannel) stripBotMention(text string) string {
 	text = strings.ReplaceAll(text, fmt.Sprintf("<@%s>", c.botUserID), "")
 	text = strings.ReplaceAll(text, fmt.Sprintf("<@!%s>", c.botUserID), "")
 	return strings.TrimSpace(text)
+}
+
+// discordTaskDetector implements tasks.TaskDetector for Discord threads.
+type discordTaskDetector struct {
+	prefix  string
+	session *discordgo.Session
+	cache   sync.Map
+}
+
+func (d *discordTaskDetector) Detect(channelID string) (tasks.TaskInfo, bool) {
+	if cached, ok := d.cache.Load(channelID); ok {
+		info := cached.(tasks.TaskInfo)
+		return info, true
+	}
+
+	ch, err := d.session.Channel(channelID)
+	if err != nil {
+		return tasks.TaskInfo{}, false
+	}
+
+	isThread := ch.Type == discordgo.ChannelTypeGuildPublicThread ||
+		ch.Type == discordgo.ChannelTypeGuildPrivateThread
+	if !isThread {
+		return tasks.TaskInfo{}, false
+	}
+
+	info := tasks.TaskInfo{TraceID: channelID}
+	if d.prefix != "" && strings.HasPrefix(ch.Name, d.prefix) {
+		info.IsTask = true
+		info.Description = strings.TrimSpace(strings.TrimPrefix(ch.Name, d.prefix))
+	}
+
+	d.cache.Store(channelID, info)
+	return info, true
+}
+
+// IsFinished checks if a message signals task completion.
+// In Discord, a task finishes when a bot sends [TASK-FINISHED].
+func (d *discordTaskDetector) IsFinished(content string, metadata map[string]string) bool {
+	isBot := metadata["is_bot"] == "true"
+	return isBot && strings.Contains(content, tasks.TaskFinishedMarker)
 }

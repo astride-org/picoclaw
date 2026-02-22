@@ -1,18 +1,15 @@
 package agent
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/lucas-stellet/playbookd"
-	"github.com/lucas-stellet/playbookd/embed"
 	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/tasks"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
@@ -35,7 +32,7 @@ type AgentInstance struct {
 	Subagents       *config.SubagentsConfig
 	SkillsFilter    []string
 	Candidates      []providers.FallbackCandidate
-	PlaybookManager *playbookd.PlaybookManager // nil if init fails
+	TaskManager tasks.TaskManager
 }
 
 // NewAgentInstance creates an agent instance from config.
@@ -93,14 +90,8 @@ func NewAgentInstance(
 		temperature = *defaults.Temperature
 	}
 
-	// Initialize playbook manager
-	pbManager, err := initPlaybookManager(workspace)
-	if err != nil {
-		logger.WarnCF("agent", "Failed to init playbook manager", map[string]any{
-			"error": err.Error(),
-		})
-		// pbManager stays nil — tools won't register, agent continues normal
-	}
+	// Initialize task manager (playbooks, task mode)
+	taskManager := tasks.NewTaskManager(workspace)
 
 	// Resolve fallback candidates
 	modelCfg := providers.ModelConfig{
@@ -126,16 +117,13 @@ func NewAgentInstance(
 		Subagents:      subagents,
 		SkillsFilter:    skillsFilter,
 		Candidates:      candidates,
-		PlaybookManager: pbManager,
+		TaskManager: taskManager,
 	}
 }
 
 // Close releases resources held by the agent instance.
 func (a *AgentInstance) Close() error {
-	if a.PlaybookManager != nil {
-		return a.PlaybookManager.Close()
-	}
-	return nil
+	return a.TaskManager.Close()
 }
 
 // resolveAgentWorkspace determines the workspace directory for an agent.
@@ -181,26 +169,3 @@ func expandHome(path string) string {
 	return path
 }
 
-// initPlaybookManager creates a PlaybookManager using .playbookd.toml from the
-// workspace if available, falling back to BM25-only (Noop embeddings) otherwise.
-func initPlaybookManager(workspace string) (*playbookd.PlaybookManager, error) {
-	playbooksDir := filepath.Join(workspace, "playbooks")
-	os.MkdirAll(playbooksDir, 0o755)
-
-	configPath := filepath.Join(workspace, ".playbookd.toml")
-	cfg, err := playbookd.LoadConfig(configPath)
-	if err == nil {
-		mgrCfg, err := cfg.BuildManagerConfig()
-		if err != nil {
-			return nil, fmt.Errorf("build playbook config: %w", err)
-		}
-		mgrCfg.DataDir = playbooksDir
-		return playbookd.NewPlaybookManager(mgrCfg)
-	}
-
-	// No config file → BM25 only (current behavior)
-	return playbookd.NewPlaybookManager(playbookd.ManagerConfig{
-		DataDir:   playbooksDir,
-		EmbedFunc: embed.Noop(),
-	})
-}

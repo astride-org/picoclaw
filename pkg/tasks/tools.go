@@ -1,4 +1,4 @@
-package tools
+package tasks
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lucas-stellet/playbookd"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // --- playbook_search ---
@@ -43,10 +44,10 @@ func (t *PlaybookSearchTool) Parameters() map[string]any {
 	}
 }
 
-func (t *PlaybookSearchTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+func (t *PlaybookSearchTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
 	query, _ := args["query"].(string)
 	if query == "" {
-		return ErrorResult("query parameter is required")
+		return tools.ErrorResult("query parameter is required")
 	}
 
 	limit := 5
@@ -60,11 +61,11 @@ func (t *PlaybookSearchTool) Execute(ctx context.Context, args map[string]any) *
 		Limit: limit,
 	})
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("playbook search failed: %v", err))
+		return tools.ErrorResult(fmt.Sprintf("playbook search failed: %v", err))
 	}
 
 	if len(results) == 0 {
-		return SilentResult("No playbooks found matching the query.")
+		return tools.SilentResult("No playbooks found matching the query.")
 	}
 
 	var sb strings.Builder
@@ -103,7 +104,7 @@ func (t *PlaybookSearchTool) Execute(ctx context.Context, args map[string]any) *
 		sb.WriteString("\n")
 	}
 
-	return SilentResult(sb.String())
+	return tools.SilentResult(sb.String())
 }
 
 // --- playbook_create ---
@@ -165,13 +166,13 @@ func (t *PlaybookCreateTool) Parameters() map[string]any {
 	}
 }
 
-func (t *PlaybookCreateTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+func (t *PlaybookCreateTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
 	name, _ := args["name"].(string)
 	description, _ := args["description"].(string)
 	category, _ := args["category"].(string)
 
 	if name == "" || description == "" {
-		return ErrorResult("name and description are required")
+		return tools.ErrorResult("name and description are required")
 	}
 
 	// Parse tags
@@ -219,7 +220,7 @@ func (t *PlaybookCreateTool) Execute(ctx context.Context, args map[string]any) *
 	}
 
 	if len(steps) == 0 {
-		return ErrorResult("at least one step is required")
+		return tools.ErrorResult("at least one step is required")
 	}
 
 	pb := &playbookd.Playbook{
@@ -232,10 +233,10 @@ func (t *PlaybookCreateTool) Execute(ctx context.Context, args map[string]any) *
 	}
 
 	if err := t.manager.Create(ctx, pb); err != nil {
-		return ErrorResult(fmt.Sprintf("failed to create playbook: %v", err))
+		return tools.ErrorResult(fmt.Sprintf("failed to create playbook: %v", err))
 	}
 
-	return SilentResult(fmt.Sprintf("Playbook created successfully.\n- ID: %s\n- Name: %s\n- Slug: %s\n- Status: draft\n- Steps: %d",
+	return tools.SilentResult(fmt.Sprintf("Playbook created successfully.\n- ID: %s\n- Name: %s\n- Slug: %s\n- Status: draft\n- Steps: %d",
 		pb.ID, pb.Name, pb.Slug, len(pb.Steps)))
 }
 
@@ -303,13 +304,13 @@ func (t *PlaybookRecordTool) Parameters() map[string]any {
 	}
 }
 
-func (t *PlaybookRecordTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+func (t *PlaybookRecordTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
 	playbookID, _ := args["playbook_id"].(string)
 	outcomeStr, _ := args["outcome"].(string)
 	taskContext, _ := args["task_context"].(string)
 
 	if playbookID == "" || outcomeStr == "" {
-		return ErrorResult("playbook_id and outcome are required")
+		return tools.ErrorResult("playbook_id and outcome are required")
 	}
 
 	outcome := playbookd.Outcome(outcomeStr)
@@ -317,7 +318,7 @@ func (t *PlaybookRecordTool) Execute(ctx context.Context, args map[string]any) *
 	// Verify playbook exists
 	pb, err := t.manager.Get(ctx, playbookID)
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("playbook not found: %v", err))
+		return tools.ErrorResult(fmt.Sprintf("playbook not found: %v", err))
 	}
 
 	// Parse step results
@@ -392,20 +393,20 @@ func (t *PlaybookRecordTool) Execute(ctx context.Context, args map[string]any) *
 	}
 
 	if err := t.manager.RecordExecution(ctx, record); err != nil {
-		return ErrorResult(fmt.Sprintf("failed to record execution: %v", err))
+		return tools.ErrorResult(fmt.Sprintf("failed to record execution: %v", err))
 	}
 
 	// Apply reflection if provided and should_update is true
 	if reflection != nil && reflection.ShouldUpdate {
 		if err := t.manager.ApplyReflection(ctx, playbookID, reflection); err != nil {
-			return SilentResult(fmt.Sprintf("Execution recorded (ID: %s), but failed to apply reflection: %v", record.ID, err))
+			return tools.SilentResult(fmt.Sprintf("Execution recorded (ID: %s), but failed to apply reflection: %v", record.ID, err))
 		}
 	}
 
 	// Fetch updated playbook for confidence info
 	updatedPb, err := t.manager.Get(ctx, playbookID)
 	if err != nil {
-		return SilentResult(fmt.Sprintf("Execution recorded (ID: %s), outcome: %s", record.ID, outcome))
+		return tools.SilentResult(fmt.Sprintf("Execution recorded (ID: %s), outcome: %s", record.ID, outcome))
 	}
 
 	result, _ := json.Marshal(map[string]any{
@@ -417,7 +418,7 @@ func (t *PlaybookRecordTool) Execute(ctx context.Context, args map[string]any) *
 		"status":       updatedPb.Status,
 	})
 
-	return SilentResult(fmt.Sprintf("Execution recorded successfully.\n%s", string(result)))
+	return tools.SilentResult(fmt.Sprintf("Execution recorded successfully.\n%s", string(result)))
 }
 
 // --- playbook_list ---
@@ -457,7 +458,7 @@ func (t *PlaybookListTool) Parameters() map[string]any {
 	}
 }
 
-func (t *PlaybookListTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+func (t *PlaybookListTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
 	filter := playbookd.ListFilter{
 		Limit: 20,
 	}
@@ -475,11 +476,11 @@ func (t *PlaybookListTool) Execute(ctx context.Context, args map[string]any) *To
 
 	playbooks, err := t.manager.List(ctx, filter)
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("failed to list playbooks: %v", err))
+		return tools.ErrorResult(fmt.Sprintf("failed to list playbooks: %v", err))
 	}
 
 	if len(playbooks) == 0 {
-		return SilentResult("No playbooks found.")
+		return tools.SilentResult("No playbooks found.")
 	}
 
 	var sb strings.Builder
@@ -500,5 +501,5 @@ func (t *PlaybookListTool) Execute(ctx context.Context, args map[string]any) *To
 		}
 	}
 
-	return SilentResult(sb.String())
+	return tools.SilentResult(sb.String())
 }

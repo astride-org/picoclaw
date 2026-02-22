@@ -26,6 +26,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
+	"github.com/sipeed/picoclaw/pkg/tasks"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
@@ -39,7 +40,6 @@ type AgentLoop struct {
 	summarizing        sync.Map
 	fallback           *providers.FallbackChain
 	channelManager     *channels.Manager
-	playbookExtractor  *PlaybookExtractor
 }
 
 // processOptions configures how a message is processed
@@ -79,7 +79,6 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 		state:             stateManager,
 		summarizing:       sync.Map{},
 		fallback:          fallbackChain,
-		playbookExtractor: &PlaybookExtractor{},
 	}
 }
 
@@ -149,14 +148,8 @@ func registerSharedTools(
 		})
 		agent.Tools.Register(spawnTool)
 
-		// Playbook tools (task mode)
-		if agent.PlaybookManager != nil {
-			agent.Tools.Register(tools.NewPlaybookSearchTool(agent.PlaybookManager))
-			agent.Tools.Register(tools.NewPlaybookCreateTool(agent.PlaybookManager))
-			agent.Tools.Register(tools.NewPlaybookRecordTool(agent.PlaybookManager, agentID))
-			agent.Tools.Register(tools.NewPlaybookListTool(agent.PlaybookManager))
-			agent.ContextBuilder.SetPlaybookManager(agent.PlaybookManager)
-		}
+		// Task mode tools (playbooks)
+		agent.TaskManager.RegisterTools(agent.Tools, agentID)
 
 		// Update context builder with the complete tools registry
 		agent.ContextBuilder.SetToolsRegistry(agent.Tools)
@@ -494,19 +487,24 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 	al.updateToolContexts(agent, opts.Channel, opts.ChatID)
 
 	// 1.5. Set task context for playbook injection
-	taskMode := opts.Metadata["task_mode"] == "true"
-	taskDescription := opts.Metadata["task_description"]
-	agent.ContextBuilder.SetTaskContext(taskMode, taskDescription)
+	taskMeta := tasks.ParseMetadata(opts.Metadata)
+	agent.ContextBuilder.SetTaskPromptSection(
+		agent.TaskManager.BuildPromptSection(taskMeta.TaskMode, taskMeta.TaskDescription),
+	)
 
 	// Handle task-finished signal: skip LLM, extract playbook
-	if opts.Metadata["task_finished"] == "true" {
+	if taskMeta.TaskFinished {
 		logger.InfoCF("agent", "Task-finished signal received, skipping LLM and extracting playbook", map[string]any{
 			"agent_id":         agent.ID,
 			"session_key":      opts.SessionKey,
-			"task_description": taskDescription,
+			"task_description": taskMeta.TaskDescription,
 		})
-		al.playbookExtractor.MaybeExtractOnFinish(agent, opts.SessionKey, opts.UserMessage, taskDescription)
-		return "Task finished. Extracting playbook from this session.", nil
+		result := agent.TaskManager.HandleTaskFinished(
+			agent.Provider, agent.Model, agent.MaxTokens,
+			agent.Sessions, opts.SessionKey,
+			opts.UserMessage, taskMeta.TaskDescription,
+		)
+		return result, nil
 	}
 
 	// 2. Build messages (skip history for heartbeat)
@@ -571,8 +569,12 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		})
 
 	// 10. Background playbook extraction for task mode sessions
-	if taskMode {
-		al.playbookExtractor.MaybeExtract(agent, opts.SessionKey, finalContent, taskDescription, iteration)
+	if taskMeta.TaskMode {
+		agent.TaskManager.MaybeExtract(
+			agent.Provider, agent.Model, agent.MaxTokens,
+			agent.Sessions, opts.SessionKey,
+			finalContent, taskMeta.TaskDescription, iteration,
+		)
 	}
 
 	return finalContent, nil
