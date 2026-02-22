@@ -1,0 +1,19 @@
+# playbookd configuration
+# See https://github.com/lucas-stellet/playbookd for documentation.
+
+[embedding]
+# Embedding provider: "noop", "openai", "ollama", "google"
+provider = "openai"
+# mode = "api"         # "api" or "local"
+model = "text-embedding-3-small"
+api_key = "${OPENAI_API_KEY}"
+url = "https://api.openai.com/v1"
+dimensions = 1536
+
+[data]
+dir = "./playbooks"
+
+[manager]
+auto_reflect = false
+max_age = "90d"
+min_confidence = 0.3

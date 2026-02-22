@@ -19,5 +19,7 @@ services:
       - ./config/agents/junior-developer/config.json:/home/picoclaw/.picoclaw/config.json:ro
       - ./workspace/junior-developer:/home/picoclaw/.picoclaw/workspace
       - ./workspace/skills:/home/picoclaw/.picoclaw/workspace/skills:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "18800:18790"
