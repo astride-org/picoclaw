@@ -31,14 +31,15 @@ import (
 )
 
 type AgentLoop struct {
-	bus            *bus.MessageBus
-	cfg            *config.Config
-	registry       *AgentRegistry
-	state          *state.Manager
-	running        atomic.Bool
-	summarizing    sync.Map
-	fallback       *providers.FallbackChain
-	channelManager *channels.Manager
+	bus                *bus.MessageBus
+	cfg                *config.Config
+	registry           *AgentRegistry
+	state              *state.Manager
+	running            atomic.Bool
+	summarizing        sync.Map
+	fallback           *providers.FallbackChain
+	channelManager     *channels.Manager
+	playbookExtractor  *PlaybookExtractor
 }
 
 // processOptions configures how a message is processed
@@ -72,12 +73,13 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	}
 
 	return &AgentLoop{
-		bus:         msgBus,
-		cfg:         cfg,
-		registry:    registry,
-		state:       stateManager,
-		summarizing: sync.Map{},
-		fallback:    fallbackChain,
+		bus:               msgBus,
+		cfg:               cfg,
+		registry:          registry,
+		state:             stateManager,
+		summarizing:       sync.Map{},
+		fallback:          fallbackChain,
+		playbookExtractor: &PlaybookExtractor{},
 	}
 }
 
@@ -557,6 +559,11 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 			"final_length": len(finalContent),
 		})
 
+	// 10. Background playbook extraction for task mode sessions
+	if taskMode {
+		al.playbookExtractor.MaybeExtract(agent, opts.SessionKey, finalContent, taskDescription, iteration)
+	}
+
 	return finalContent, nil
 }
 
@@ -811,6 +818,27 @@ func (al *AgentLoop) runLLMIteration(
 
 			// Save tool result message to session
 			agent.Sessions.AddFullMessage(opts.SessionKey, toolResultMsg)
+		}
+	}
+
+	// If we hit MaxIterations without a final text response, make one last
+	// LLM call without tools so the model is forced to summarize its findings.
+	if finalContent == "" && iteration >= agent.MaxIterations {
+		logger.WarnCF("agent", "Max iterations reached without final response, requesting summary",
+			map[string]any{
+				"agent_id":       agent.ID,
+				"max_iterations": agent.MaxIterations,
+			})
+
+		response, err := agent.Provider.Chat(ctx, messages, nil, agent.Model, map[string]any{
+			"max_tokens":  agent.MaxTokens,
+			"temperature": agent.Temperature,
+		})
+		if err != nil {
+			logger.ErrorCF("agent", "Summary call failed after max iterations",
+				map[string]any{"error": err.Error()})
+		} else if response.Content != "" {
+			finalContent = response.Content
 		}
 	}
 
