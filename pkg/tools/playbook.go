@@ -56,7 +56,7 @@ func (t *PlaybookSearchTool) Execute(ctx context.Context, args map[string]any) *
 
 	results, err := t.manager.Search(ctx, playbookd.SearchQuery{
 		Text:  query,
-		Mode:  playbookd.SearchModeBM25,
+		Mode:  playbookd.SearchModeHybrid,
 		Limit: limit,
 	})
 	if err != nil {

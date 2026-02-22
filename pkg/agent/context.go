@@ -139,7 +139,7 @@ func (cb *ContextBuilder) getPlaybookContext() string {
 
 	results, err := cb.playbookManager.Search(ctx, playbookd.SearchQuery{
 		Text:  cb.taskDescription,
-		Mode:  playbookd.SearchModeBM25,
+		Mode:  playbookd.SearchModeHybrid,
 		Limit: 3,
 	})
 	if err != nil {
