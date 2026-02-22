@@ -498,6 +498,17 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 	taskDescription := opts.Metadata["task_description"]
 	agent.ContextBuilder.SetTaskContext(taskMode, taskDescription)
 
+	// Handle task-finished signal: skip LLM, extract playbook
+	if opts.Metadata["task_finished"] == "true" {
+		logger.InfoCF("agent", "Task-finished signal received, skipping LLM and extracting playbook", map[string]any{
+			"agent_id":         agent.ID,
+			"session_key":      opts.SessionKey,
+			"task_description": taskDescription,
+		})
+		al.playbookExtractor.MaybeExtractOnFinish(agent, opts.SessionKey, opts.UserMessage, taskDescription)
+		return "Task finished. Extracting playbook from this session.", nil
+	}
+
 	// 2. Build messages (skip history for heartbeat)
 	var history []providers.Message
 	var summary string

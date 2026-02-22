@@ -15,13 +15,42 @@ import (
 // PlaybookExtractor creates playbooks from completed task sessions in the background.
 type PlaybookExtractor struct{}
 
-// MaybeExtract checks if playbook extraction should run and spawns it in the background.
-// It is a no-op when conditions are not met (no task mode, no playbook manager, trivial session).
+// MaybeExtract is a no-op. Playbook extraction now only happens on the explicit
+// task-finished signal via MaybeExtractOnFinish.
 func (pe *PlaybookExtractor) MaybeExtract(agent *AgentInstance, sessionKey, finalResponse, taskDescription string, iterations int) {
-	if taskDescription == "" || agent.PlaybookManager == nil || iterations <= 1 {
+	// No-op: extraction only on task-finished signal
+}
+
+// MaybeExtractOnFinish extracts a playbook when a task-finished signal is received.
+// It uses the bot message content (which contains the task session log from the subagent)
+// as the session context, since the receiving agent may not have its own history for this thread.
+func (pe *PlaybookExtractor) MaybeExtractOnFinish(agent *AgentInstance, sessionKey, botMessage, taskDescription string) {
+	if taskDescription == "" || agent.PlaybookManager == nil {
+		logger.DebugCF("playbook", "MaybeExtractOnFinish skipped (no task description or playbook manager)", map[string]any{
+			"session_key":      sessionKey,
+			"task_description": taskDescription,
+			"has_manager":      agent.PlaybookManager != nil,
+		})
 		return
 	}
-	go pe.extract(agent, sessionKey, finalResponse, taskDescription)
+	// Use bot message as session context; fall back to session history if available
+	sessionContext := botMessage
+	if sessionContext == "" {
+		history := agent.Sessions.GetHistory(sessionKey)
+		for i := len(history) - 1; i >= 0; i-- {
+			if history[i].Role == "assistant" && history[i].Content != "" {
+				sessionContext = history[i].Content
+				break
+			}
+		}
+	}
+	logger.InfoCF("playbook", "Starting playbook extraction from task-finished signal", map[string]any{
+		"session_key":       sessionKey,
+		"task_description":  taskDescription,
+		"context_len":       len(sessionContext),
+		"has_context":       sessionContext != "",
+	})
+	go pe.extract(agent, sessionKey, sessionContext, taskDescription)
 }
 
 // extract runs a background LLM call to distill a completed task session into a reusable playbook.
@@ -30,12 +59,19 @@ func (pe *PlaybookExtractor) extract(agent *AgentInstance, sessionKey, finalResp
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// Build session log from history if available; otherwise use finalResponse directly
+	sessionLog := ""
 	history := agent.Sessions.GetHistory(sessionKey)
-	if len(history) == 0 {
-		return
+	if len(history) > 0 {
+		sessionLog = buildSessionLog(history)
 	}
 
-	sessionLog := buildSessionLog(history)
+	if sessionLog == "" && finalResponse == "" {
+		logger.DebugCF("playbook", "Playbook extraction skipped (no session log and no final response)", map[string]any{
+			"session_key": sessionKey,
+		})
+		return
+	}
 
 	prompt := fmt.Sprintf(`You just completed a task. Extract a reusable playbook from this session.
 

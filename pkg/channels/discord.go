@@ -374,6 +374,17 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 			metadata["task_mode"] = "true"
 			metadata["task_description"] = info.Description
 			metadata["thread_id"] = m.ChannelID
+
+			// Bot message with [TASK-FINISHED] marker = task-finished signal
+			if m.Author.Bot && strings.Contains(m.Content, "[TASK-FINISHED]") {
+				metadata["task_finished"] = "true"
+				logger.InfoCF("discord", "Task-finished signal detected", map[string]any{
+					"bot_username": m.Author.Username,
+					"bot_id":       m.Author.ID,
+					"thread_id":    m.ChannelID,
+					"task":         info.Description,
+				})
+			}
 		}
 	}
 
