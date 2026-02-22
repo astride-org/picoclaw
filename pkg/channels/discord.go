@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -13,9 +14,12 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/tasks"
 	"github.com/sipeed/picoclaw/pkg/utils"
 	"github.com/sipeed/picoclaw/pkg/voice"
 )
+
+var thinkTagRe = regexp.MustCompile(`(?s)<think>\s*(.*?)\s*</think>`)
 
 const (
 	transcriptionTimeout = 30 * time.Second
@@ -24,13 +28,14 @@ const (
 
 type DiscordChannel struct {
 	*BaseChannel
-	session     *discordgo.Session
-	config      config.DiscordConfig
-	transcriber *voice.GroqTranscriber
-	ctx         context.Context
-	typingMu    sync.Mutex
-	typingStop  map[string]chan struct{} // chatID → stop signal
-	botUserID   string                   // stored for mention checking
+	session      *discordgo.Session
+	config       config.DiscordConfig
+	transcriber  *voice.GroqTranscriber
+	ctx          context.Context
+	typingMu     sync.Mutex
+	typingStop   map[string]chan struct{} // chatID → stop signal
+	botUserID    string                   // stored for mention checking
+	taskDetector tasks.TaskDetector       // nil if TaskPrefix is empty
 }
 
 func NewDiscordChannel(cfg config.DiscordConfig, bus *bus.MessageBus) (*DiscordChannel, error) {
@@ -41,14 +46,23 @@ func NewDiscordChannel(cfg config.DiscordConfig, bus *bus.MessageBus) (*DiscordC
 
 	base := NewBaseChannel("discord", cfg, bus, cfg.AllowFrom)
 
-	return &DiscordChannel{
+	dc := &DiscordChannel{
 		BaseChannel: base,
 		session:     session,
 		config:      cfg,
 		transcriber: nil,
 		ctx:         context.Background(),
 		typingStop:  make(map[string]chan struct{}),
-	}, nil
+	}
+
+	if cfg.TaskPrefix != "" {
+		dc.taskDetector = &discordTaskDetector{
+			prefix:  cfg.TaskPrefix,
+			session: session,
+		}
+	}
+
+	return dc, nil
 }
 
 func (c *DiscordChannel) SetTranscriber(transcriber *voice.GroqTranscriber) {
@@ -126,7 +140,31 @@ func (c *DiscordChannel) Send(ctx context.Context, msg bus.OutboundMessage) erro
 		return nil
 	}
 
-	chunks := utils.SplitMessage(msg.Content, 2000) // Split messages into chunks, Discord length limit: 2000 chars
+	// Extract <think>...</think> blocks and send them as embeds
+	thinkMatches := thinkTagRe.FindAllStringSubmatch(msg.Content, -1)
+	body := strings.TrimSpace(thinkTagRe.ReplaceAllString(msg.Content, ""))
+
+	for _, match := range thinkMatches {
+		thinkText := match[1]
+		if thinkText == "" {
+			continue
+		}
+		// Discord embed description limit is 4096 chars
+		if len(thinkText) > 4096 {
+			thinkText = thinkText[:4093] + "..."
+		}
+		if err := c.sendEmbed(ctx, channelID, thinkText); err != nil {
+			logger.WarnCF("discord", "Failed to send think embed", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
+
+	if body == "" {
+		return nil
+	}
+
+	chunks := utils.SplitMessage(body, 2000) // Split messages into chunks, Discord length limit: 2000 chars
 
 	for _, chunk := range chunks {
 		if err := c.sendChunk(ctx, channelID, chunk); err != nil {
@@ -156,6 +194,35 @@ func (c *DiscordChannel) sendChunk(ctx context.Context, channelID, content strin
 		return nil
 	case <-sendCtx.Done():
 		return fmt.Errorf("send message timeout: %w", sendCtx.Err())
+	}
+}
+
+func (c *DiscordChannel) sendEmbed(ctx context.Context, channelID, description string) error {
+	sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Embeds: []*discordgo.MessageEmbed{
+				{
+					Description: description,
+					Color:       0x95a5a6, // gray
+					Footer:      &discordgo.MessageEmbedFooter{Text: "thinking"},
+				},
+			},
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("failed to send discord embed: %w", err)
+		}
+		return nil
+	case <-sendCtx.Done():
+		return fmt.Errorf("send embed timeout: %w", sendCtx.Err())
 	}
 }
 
@@ -317,6 +384,24 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 		content = fmt.Sprintf("%s: %s", senderName, content)
 	}
 
+	// Detect task threads via TaskDetector
+	if c.taskDetector != nil {
+		if info, ok := c.taskDetector.Detect(m.ChannelID); ok && info.IsTask {
+			tasks.ApplyTaskMetadata(metadata, info)
+			// Check if this message signals task completion
+			msgMeta := map[string]string{"is_bot": fmt.Sprintf("%t", m.Author.Bot)}
+			if c.taskDetector.IsFinished(m.Content, msgMeta) {
+				metadata["task_finished"] = "true"
+				logger.InfoCF("discord", "Task-finished signal detected", map[string]any{
+					"bot_username": m.Author.Username,
+					"bot_id":       m.Author.ID,
+					"trace_id":     info.TraceID,
+					"task":         info.Description,
+				})
+			}
+		}
+	}
+
 	c.HandleMessage(senderID, m.ChannelID, content, mediaPaths, metadata)
 }
 
@@ -382,4 +467,45 @@ func (c *DiscordChannel) stripBotMention(text string) string {
 	text = strings.ReplaceAll(text, fmt.Sprintf("<@%s>", c.botUserID), "")
 	text = strings.ReplaceAll(text, fmt.Sprintf("<@!%s>", c.botUserID), "")
 	return strings.TrimSpace(text)
+}
+
+// discordTaskDetector implements tasks.TaskDetector for Discord threads.
+type discordTaskDetector struct {
+	prefix  string
+	session *discordgo.Session
+	cache   sync.Map
+}
+
+func (d *discordTaskDetector) Detect(channelID string) (tasks.TaskInfo, bool) {
+	if cached, ok := d.cache.Load(channelID); ok {
+		info := cached.(tasks.TaskInfo)
+		return info, true
+	}
+
+	ch, err := d.session.Channel(channelID)
+	if err != nil {
+		return tasks.TaskInfo{}, false
+	}
+
+	isThread := ch.Type == discordgo.ChannelTypeGuildPublicThread ||
+		ch.Type == discordgo.ChannelTypeGuildPrivateThread
+	if !isThread {
+		return tasks.TaskInfo{}, false
+	}
+
+	info := tasks.TaskInfo{TraceID: channelID}
+	if d.prefix != "" && strings.HasPrefix(ch.Name, d.prefix) {
+		info.IsTask = true
+		info.Description = strings.TrimSpace(strings.TrimPrefix(ch.Name, d.prefix))
+	}
+
+	d.cache.Store(channelID, info)
+	return info, true
+}
+
+// IsFinished checks if a message signals task completion.
+// In Discord, a task finishes when a bot sends [TASK-FINISHED].
+func (d *discordTaskDetector) IsFinished(content string, metadata map[string]string) bool {
+	isBot := metadata["is_bot"] == "true"
+	return isBot && strings.Contains(content, tasks.TaskFinishedMarker)
 }

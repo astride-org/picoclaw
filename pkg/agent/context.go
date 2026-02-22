@@ -15,10 +15,11 @@ import (
 )
 
 type ContextBuilder struct {
-	workspace    string
-	skillsLoader *skills.SkillsLoader
-	memory       *MemoryStore
-	tools        *tools.ToolRegistry // Direct reference to tool registry
+	workspace       string
+	skillsLoader    *skills.SkillsLoader
+	memory          *MemoryStore
+	tools           *tools.ToolRegistry // Direct reference to tool registry
+	taskPromptSection string
 }
 
 func getGlobalConfigDir() string {
@@ -46,6 +47,11 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 // SetToolsRegistry sets the tools registry for dynamic tool summary generation.
 func (cb *ContextBuilder) SetToolsRegistry(registry *tools.ToolRegistry) {
 	cb.tools = registry
+}
+
+// SetTaskPromptSection sets the pre-built task mode section for the system prompt.
+func (cb *ContextBuilder) SetTaskPromptSection(section string) {
+	cb.taskPromptSection = section
 }
 
 func (cb *ContextBuilder) getIdentity() string {
@@ -134,6 +140,11 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 	memoryContext := cb.memory.GetMemoryContext()
 	if memoryContext != "" {
 		parts = append(parts, "# Memory\n\n"+memoryContext)
+	}
+
+	// Task mode context (playbooks)
+	if cb.taskPromptSection != "" {
+		parts = append(parts, cb.taskPromptSection)
 	}
 
 	// Join with "---" separator

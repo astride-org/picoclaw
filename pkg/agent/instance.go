@@ -9,6 +9,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/tasks"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
@@ -28,9 +29,10 @@ type AgentInstance struct {
 	Sessions       *session.SessionManager
 	ContextBuilder *ContextBuilder
 	Tools          *tools.ToolRegistry
-	Subagents      *config.SubagentsConfig
-	SkillsFilter   []string
-	Candidates     []providers.FallbackCandidate
+	Subagents       *config.SubagentsConfig
+	SkillsFilter    []string
+	Candidates      []providers.FallbackCandidate
+	TaskManager tasks.TaskManager
 }
 
 // NewAgentInstance creates an agent instance from config.
@@ -88,6 +90,9 @@ func NewAgentInstance(
 		temperature = *defaults.Temperature
 	}
 
+	// Initialize task manager (playbooks, task mode)
+	taskManager := tasks.NewTaskManager(workspace)
+
 	// Resolve fallback candidates
 	modelCfg := providers.ModelConfig{
 		Primary:   model,
@@ -110,9 +115,15 @@ func NewAgentInstance(
 		ContextBuilder: contextBuilder,
 		Tools:          toolsRegistry,
 		Subagents:      subagents,
-		SkillsFilter:   skillsFilter,
-		Candidates:     candidates,
+		SkillsFilter:    skillsFilter,
+		Candidates:      candidates,
+		TaskManager: taskManager,
 	}
+}
+
+// Close releases resources held by the agent instance.
+func (a *AgentInstance) Close() error {
+	return a.TaskManager.Close()
 }
 
 // resolveAgentWorkspace determines the workspace directory for an agent.
@@ -157,3 +168,4 @@ func expandHome(path string) string {
 	}
 	return path
 }
+

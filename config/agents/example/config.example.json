@@ -1,0 +1,43 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.picoclaw/workspace/example",
+      "restrict_to_workspace": true,
+      "model": "YOUR_MODEL_NAME",
+      "max_tokens": 8192,
+      "temperature": 0.5,
+      "max_tool_iterations": 20
+    }
+  },
+  "model_list": [
+    {
+      "model_name": "YOUR_MODEL_NAME",
+      "model": "model-id",
+      "api_base": "https://api.example.com/v1",
+      "api_key": "sk-your-api-key"
+    }
+  ],
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "token": "your-discord-bot-token",
+      "allow_from": [],
+      "mention_only": true
+    }
+  },
+  "tools": {
+    "web": {
+      "duckduckgo": {
+        "enabled": true,
+        "max_results": 5
+      }
+    }
+  },
+  "heartbeat": {
+    "enabled": false
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790
+  }
+}

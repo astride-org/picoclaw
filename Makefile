@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test
+.PHONY: all build install uninstall clean help test docker-up docker-down docker-rebuild docker-logs docker-build docker-build-full docker-test docker-run docker-run-full docker-run-agent docker-run-agent-full docker-clean new-agent
 
 # Build variables
 BINARY_NAME=picoclaw
@@ -158,6 +158,89 @@ check: deps fmt vet test
 run: build
 	@$(BUILD_DIR)/$(BINARY_NAME) $(ARGS)
 
+# Docker Compose (multi-agent)
+# Discovers all agents from config/agents/*/compose.yml automatically
+COMPOSE_FILE=docker-compose.multi.yml
+AGENT_COMPOSE_FILES:=$(wildcard config/agents/*/compose.yml)
+COMPOSE_FLAGS=-f $(COMPOSE_FILE) $(foreach f,$(AGENT_COMPOSE_FILES),-f $(f)) --project-directory .
+
+## docker-up: Build and start all gateway agents
+docker-up:
+	@docker compose $(COMPOSE_FLAGS) --profile gateway up --build -d
+
+## docker-up-%: Build and start a single agent (e.g. make docker-up-senior-developer)
+docker-up-%:
+	@docker compose $(COMPOSE_FLAGS) up --build -d picoclaw-$*
+
+## docker-rebuild: Rebuild and restart containers without downtime
+docker-rebuild:
+	@docker compose $(COMPOSE_FLAGS) --profile gateway up --build -d --force-recreate
+
+## docker-rebuild-%: Rebuild and restart a single agent (e.g. make docker-rebuild-senior-developer)
+docker-rebuild-%:
+	@docker compose $(COMPOSE_FLAGS) up --build -d --force-recreate picoclaw-$*
+
+## docker-down: Stop all containers
+docker-down:
+	@docker compose $(COMPOSE_FLAGS) --profile gateway down
+
+## docker-logs: Follow logs from all gateway agents
+docker-logs:
+	@docker compose $(COMPOSE_FLAGS) --profile gateway logs -f
+
+## new-agent: Scaffold a new agent (usage: make new-agent NAME=my-agent)
+new-agent:
+	@if [ -z "$(NAME)" ]; then echo "Usage: make new-agent NAME=my-agent"; exit 1; fi
+	@if [ -d "config/agents/$(NAME)" ]; then echo "Error: agent '$(NAME)' already exists"; exit 1; fi
+	@mkdir -p config/agents/$(NAME)
+	@sed 's/example/$(NAME)/g' config/agents/example/config.example.json > config/agents/$(NAME)/config.json
+	@sed 's/example/$(NAME)/g' config/agents/example/compose.example.yml > config/agents/$(NAME)/compose.yml
+	@mkdir -p workspace/$(NAME)
+	@ln -sfn ../skills workspace/$(NAME)/skills
+	@echo "Agent '$(NAME)' created:"
+	@echo "  config/agents/$(NAME)/config.json   <- edit API keys and Discord token"
+	@echo "  config/agents/$(NAME)/compose.yml    <- edit port if needed"
+	@echo ""
+	@echo "Start with: make docker-up-$(NAME)"
+
+## docker-build: Build Docker image (minimal Alpine-based)
+docker-build:
+	@echo "Building minimal Docker image (Alpine-based)..."
+	docker compose build picoclaw-agent picoclaw-gateway
+
+## docker-build-full: Build Docker image with full MCP support (Node.js 24)
+docker-build-full:
+	@echo "Building full-featured Docker image (Node.js 24)..."
+	docker compose -f docker-compose.full.yml build picoclaw-agent picoclaw-gateway
+
+## docker-test: Test MCP tools in Docker container
+docker-test:
+	@echo "Testing MCP tools in Docker..."
+	@chmod +x scripts/test-docker-mcp.sh
+	@./scripts/test-docker-mcp.sh
+
+## docker-run: Run picoclaw gateway in Docker (Alpine-based)
+docker-run:
+	docker compose --profile gateway up
+
+## docker-run-full: Run picoclaw gateway in Docker (full-featured)
+docker-run-full:
+	docker compose -f docker-compose.full.yml --profile gateway up
+
+## docker-run-agent: Run picoclaw agent in Docker (interactive, Alpine-based)
+docker-run-agent:
+	docker compose run --rm picoclaw-agent
+
+## docker-run-agent-full: Run picoclaw agent in Docker (interactive, full-featured)
+docker-run-agent-full:
+	docker compose -f docker-compose.full.yml run --rm picoclaw-agent
+
+## docker-clean: Clean Docker images and volumes
+docker-clean:
+	docker compose down -v
+	docker compose -f docker-compose.full.yml down -v
+	docker rmi picoclaw:latest picoclaw:full 2>/dev/null || true
+
 ## help: Show this help message
 help:
 	@echo "picoclaw Makefile"
@@ -173,6 +256,8 @@ help:
 	@echo "  make install            # Install to ~/.local/bin"
 	@echo "  make uninstall          # Remove from /usr/local/bin"
 	@echo "  make install-skills     # Install skills to workspace"
+	@echo "  make docker-build       # Build minimal Docker image"
+	@echo "  make docker-test        # Test MCP tools in Docker"
 	@echo ""
 	@echo "Environment Variables:"
 	@echo "  INSTALL_PREFIX          # Installation prefix (default: ~/.local)"

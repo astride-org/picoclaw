@@ -221,6 +221,7 @@ type DiscordConfig struct {
 	Token       string              `json:"token"        env:"PICOCLAW_CHANNELS_DISCORD_TOKEN"`
 	AllowFrom   FlexibleStringSlice `json:"allow_from"   env:"PICOCLAW_CHANNELS_DISCORD_ALLOW_FROM"`
 	MentionOnly bool                `json:"mention_only" env:"PICOCLAW_CHANNELS_DISCORD_MENTION_ONLY"`
+	TaskPrefix  string              `json:"task_prefix"  env:"PICOCLAW_CHANNELS_DISCORD_TASK_PREFIX"`
 }
 
 type MaixCamConfig struct {
@@ -449,6 +450,7 @@ type ToolsConfig struct {
 	Cron   CronToolsConfig   `json:"cron"`
 	Exec   ExecConfig        `json:"exec"`
 	Skills SkillsToolsConfig `json:"skills"`
+	MCP    MCPConfig         `json:"mcp"`
 }
 
 type SkillsToolsConfig struct {
@@ -476,6 +478,34 @@ type ClawHubRegistryConfig struct {
 	Timeout         int    `json:"timeout"           env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_TIMEOUT"`
 	MaxZipSize      int    `json:"max_zip_size"      env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_MAX_ZIP_SIZE"`
 	MaxResponseSize int    `json:"max_response_size" env:"PICOCLAW_SKILLS_REGISTRIES_CLAWHUB_MAX_RESPONSE_SIZE"`
+}
+
+// MCPServerConfig defines configuration for a single MCP server
+type MCPServerConfig struct {
+	// Enabled indicates whether this MCP server is active
+	Enabled bool `json:"enabled"`
+	// Command is the executable to run (e.g., "npx", "python", "/path/to/server")
+	Command string `json:"command"`
+	// Args are the arguments to pass to the command
+	Args []string `json:"args,omitempty"`
+	// Env are environment variables to set for the server process (stdio only)
+	Env map[string]string `json:"env,omitempty"`
+	// EnvFile is the path to a file containing environment variables (stdio only)
+	EnvFile string `json:"env_file,omitempty"`
+	// Type is "stdio", "sse", or "http" (default: stdio if command is set, sse if url is set)
+	Type string `json:"type,omitempty"`
+	// URL is used for SSE/HTTP transport
+	URL string `json:"url,omitempty"`
+	// Headers are HTTP headers to send with requests (sse/http only)
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// MCPConfig defines configuration for all MCP servers
+type MCPConfig struct {
+	// Enabled globally enables/disables MCP integration
+	Enabled bool `json:"enabled" env:"PICOCLAW_TOOLS_MCP_ENABLED"`
+	// Servers is a map of server name to server configuration
+	Servers map[string]MCPServerConfig `json:"servers,omitempty"`
 }
 
 func LoadConfig(path string) (*Config, error) {

@@ -21,35 +21,38 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/mcp"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
+	"github.com/sipeed/picoclaw/pkg/tasks"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type AgentLoop struct {
-	bus            *bus.MessageBus
-	cfg            *config.Config
-	registry       *AgentRegistry
-	state          *state.Manager
-	running        atomic.Bool
-	summarizing    sync.Map
-	fallback       *providers.FallbackChain
-	channelManager *channels.Manager
+	bus                *bus.MessageBus
+	cfg                *config.Config
+	registry           *AgentRegistry
+	state              *state.Manager
+	running            atomic.Bool
+	summarizing        sync.Map
+	fallback           *providers.FallbackChain
+	channelManager     *channels.Manager
 }
 
 // processOptions configures how a message is processed
 type processOptions struct {
-	SessionKey      string // Session identifier for history/context
-	Channel         string // Target channel for tool execution
-	ChatID          string // Target chat ID for tool execution
-	UserMessage     string // User message content (may include prefix)
-	DefaultResponse string // Response when LLM returns empty
-	EnableSummary   bool   // Whether to trigger summarization
-	SendResponse    bool   // Whether to send response via bus
-	NoHistory       bool   // If true, don't load session history (for heartbeat)
+	SessionKey      string            // Session identifier for history/context
+	Channel         string            // Target channel for tool execution
+	ChatID          string            // Target chat ID for tool execution
+	UserMessage     string            // User message content (may include prefix)
+	DefaultResponse string            // Response when LLM returns empty
+	EnableSummary   bool              // Whether to trigger summarization
+	SendResponse    bool              // Whether to send response via bus
+	NoHistory       bool              // If true, don't load session history (for heartbeat)
+	Metadata        map[string]string // Forwarded from InboundMessage
 }
 
 func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers.LLMProvider) *AgentLoop {
@@ -70,12 +73,12 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	}
 
 	return &AgentLoop{
-		bus:         msgBus,
-		cfg:         cfg,
-		registry:    registry,
-		state:       stateManager,
-		summarizing: sync.Map{},
-		fallback:    fallbackChain,
+		bus:               msgBus,
+		cfg:               cfg,
+		registry:          registry,
+		state:             stateManager,
+		summarizing:       sync.Map{},
+		fallback:          fallbackChain,
 	}
 }
 
@@ -145,6 +148,9 @@ func registerSharedTools(
 		})
 		agent.Tools.Register(spawnTool)
 
+		// Task mode tools (playbooks)
+		agent.TaskManager.RegisterTools(agent.Tools, agentID)
+
 		// Update context builder with the complete tools registry
 		agent.ContextBuilder.SetToolsRegistry(agent.Tools)
 	}
@@ -152,6 +158,71 @@ func registerSharedTools(
 
 func (al *AgentLoop) Run(ctx context.Context) error {
 	al.running.Store(true)
+
+	// Initialize MCP servers for all agents
+	if al.cfg.Tools.MCP.Enabled {
+		mcpManager := mcp.NewManager()
+		defaultAgent := al.registry.GetDefaultAgent()
+		workspacePath := ""
+		if defaultAgent != nil && defaultAgent.Workspace != "" {
+			workspacePath = defaultAgent.Workspace
+		} else {
+			workspacePath = al.cfg.WorkspacePath()
+		}
+
+		if err := mcpManager.LoadFromMCPConfig(ctx, al.cfg.Tools.MCP, workspacePath); err != nil {
+			logger.WarnCF("agent", "Failed to load MCP servers, MCP tools will not be available",
+				map[string]interface{}{
+					"error": err.Error(),
+				})
+		} else {
+			// Ensure MCP connections are cleaned up on exit, only if initialization succeeded
+			defer func() {
+				if err := mcpManager.Close(); err != nil {
+					logger.ErrorCF("agent", "Failed to close MCP manager",
+						map[string]interface{}{
+							"error": err.Error(),
+						})
+				}
+			}()
+
+			// Register MCP tools for all agents
+			servers := mcpManager.GetServers()
+			uniqueTools := 0
+			totalRegistrations := 0
+			agentIDs := al.registry.ListAgentIDs()
+			agentCount := len(agentIDs)
+
+			for serverName, conn := range servers {
+				uniqueTools += len(conn.Tools)
+				for _, tool := range conn.Tools {
+					for _, agentID := range agentIDs {
+						agent, ok := al.registry.GetAgent(agentID)
+						if !ok {
+							continue
+						}
+						mcpTool := tools.NewMCPTool(mcpManager, serverName, tool)
+						agent.Tools.Register(mcpTool)
+						totalRegistrations++
+						logger.DebugCF("agent", "Registered MCP tool",
+							map[string]interface{}{
+								"agent_id": agentID,
+								"server":   serverName,
+								"tool":     tool.Name,
+								"name":     mcpTool.Name(),
+							})
+					}
+				}
+			}
+			logger.InfoCF("agent", "MCP tools registered successfully",
+				map[string]interface{}{
+					"server_count":        len(servers),
+					"unique_tools":        uniqueTools,
+					"total_registrations": totalRegistrations,
+					"agent_count":         agentCount,
+				})
+		}
+	}
 
 	for al.running.Load() {
 		select {
@@ -323,6 +394,18 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		return al.storeContextOnly(agent, sessionKey, msg.Content)
 	}
 
+	if msg.Metadata["task_mode"] == "true" {
+		logger.InfoCF("agent", "Task mode activated", map[string]any{
+			"task_description": msg.Metadata["task_description"],
+			"thread_id":        msg.Metadata["thread_id"],
+			"channel":          msg.Channel,
+			"chat_id":          msg.ChatID,
+			"sender_id":        msg.SenderID,
+			"agent_id":         agent.ID,
+			"session_key":      sessionKey,
+		})
+	}
+
 	return al.runAgentLoop(ctx, agent, processOptions{
 		SessionKey:      sessionKey,
 		Channel:         msg.Channel,
@@ -331,6 +414,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		DefaultResponse: "I've completed processing but have no response to give.",
 		EnableSummary:   true,
 		SendResponse:    false,
+		Metadata:        msg.Metadata,
 	})
 }
 
@@ -406,6 +490,27 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 	// 1. Update tool contexts
 	al.updateToolContexts(agent, opts.Channel, opts.ChatID)
 
+	// 1.5. Set task context for playbook injection
+	taskMeta := tasks.ParseMetadata(opts.Metadata)
+	agent.ContextBuilder.SetTaskPromptSection(
+		agent.TaskManager.BuildPromptSection(taskMeta.TaskMode, taskMeta.TaskDescription),
+	)
+
+	// Handle task-finished signal: skip LLM, extract playbook
+	if taskMeta.TaskFinished {
+		logger.InfoCF("agent", "Task-finished signal received, skipping LLM and extracting playbook", map[string]any{
+			"agent_id":         agent.ID,
+			"session_key":      opts.SessionKey,
+			"task_description": taskMeta.TaskDescription,
+		})
+		result := agent.TaskManager.HandleTaskFinished(
+			agent.Provider, agent.Model, agent.MaxTokens,
+			agent.Sessions, opts.SessionKey,
+			opts.UserMessage, taskMeta.TaskDescription,
+		)
+		return result, nil
+	}
+
 	// 2. Build messages (skip history for heartbeat)
 	var history []providers.Message
 	var summary string
@@ -466,6 +571,15 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 			"iterations":   iteration,
 			"final_length": len(finalContent),
 		})
+
+	// 10. Background playbook extraction for task mode sessions
+	if taskMeta.TaskMode {
+		agent.TaskManager.MaybeExtract(
+			agent.Provider, agent.Model, agent.MaxTokens,
+			agent.Sessions, opts.SessionKey,
+			finalContent, taskMeta.TaskDescription, iteration,
+		)
+	}
 
 	return finalContent, nil
 }
@@ -721,6 +835,27 @@ func (al *AgentLoop) runLLMIteration(
 
 			// Save tool result message to session
 			agent.Sessions.AddFullMessage(opts.SessionKey, toolResultMsg)
+		}
+	}
+
+	// If we hit MaxIterations without a final text response, make one last
+	// LLM call without tools so the model is forced to summarize its findings.
+	if finalContent == "" && iteration >= agent.MaxIterations {
+		logger.WarnCF("agent", "Max iterations reached without final response, requesting summary",
+			map[string]any{
+				"agent_id":       agent.ID,
+				"max_iterations": agent.MaxIterations,
+			})
+
+		response, err := agent.Provider.Chat(ctx, messages, nil, agent.Model, map[string]any{
+			"max_tokens":  agent.MaxTokens,
+			"temperature": agent.Temperature,
+		})
+		if err != nil {
+			logger.ErrorCF("agent", "Summary call failed after max iterations",
+				map[string]any{"error": err.Error()})
+		} else if response.Content != "" {
+			finalContent = response.Content
 		}
 	}
 
